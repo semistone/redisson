@@ -61,6 +61,8 @@ public class RedisConnection implements RedisCommands {
     @Deprecated
     private Runnable disconnectedListener;
 
+    private volatile Runnable releaseConnection;
+
     private final AtomicInteger usage = new AtomicInteger();
 
     public <C> RedisConnection(RedisClient redisClient, Channel channel, CompletableFuture<C> connectionPromise) {
@@ -72,7 +74,8 @@ public class RedisConnection implements RedisCommands {
 
         LOG.debug("Connection created {}", redisClient);
     }
-    
+
+
     protected RedisConnection(RedisClient redisClient) {
         this.redisClient = redisClient;
     }
@@ -353,4 +356,13 @@ public class RedisConnection implements RedisCommands {
         return getClass().getSimpleName() + "@" + System.identityHashCode(this) + " [redisClient=" + redisClient + ", channel=" + channel + ", currentCommand=" + getCurrentCommand() + ", usage=" + usage + "]";
     }
 
+    public void releaseConnection() {
+        if (releaseConnection != null) {
+            releaseConnection.run();
+        }
+    }
+
+    public void setReleaseConnection(Runnable releaseRunnable) {
+        this.releaseConnection = releaseRunnable;
+    }
 }

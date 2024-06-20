@@ -18,6 +18,7 @@ package org.redisson.misc;
 import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -28,7 +29,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class AsyncSemaphore {
 
     private final AtomicInteger counter;
-    private final Queue<CompletableFuture<Void>> listeners = new ConcurrentLinkedQueue<>();
+    private final Queue<CompletableFuture<Runnable>> listeners = new ConcurrentLinkedQueue<>();
 
     public AsyncSemaphore(int permits) {
         counter = new AtomicInteger(permits);
@@ -42,8 +43,8 @@ public class AsyncSemaphore {
         listeners.clear();
     }
 
-    public CompletableFuture<Void> acquire() {
-        CompletableFuture<Void> future = new CompletableFuture<>();
+    public CompletableFuture<Runnable> acquire() {
+        CompletableFuture<Runnable> future = new CompletableFuture<>();
         listeners.add(future);
         tryRun();
         return future;
@@ -52,14 +53,21 @@ public class AsyncSemaphore {
     private void tryRun() {
         while (true) {
             if (counter.decrementAndGet() >= 0) {
-                CompletableFuture<Void> future = listeners.poll();
+                CompletableFuture<Runnable> future = listeners.poll();
                 if (future == null) {
                     counter.incrementAndGet();
                     return;
                 }
 
-                if (future.complete(null)) {
-                    return;
+                if (!future.isDone()) {
+                    AtomicBoolean once = new AtomicBoolean();
+                    if (future.complete(() -> {
+                        if (once.compareAndSet(false, true)) {
+                            release();
+                        }
+                    })) {
+                        return;
+                    }
                 }
             }
 

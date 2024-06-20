@@ -753,7 +753,7 @@ public class PublishSubscribeService {
         }
 
         AsyncSemaphore lock = getSemaphore(channelName);
-        CompletableFuture<Void> f = lock.acquire();
+        CompletableFuture<Runnable> f = lock.acquire();
         return f.thenCompose(v -> {
             Codec entryCodec;
             if (topicType == PubSubType.PUNSUBSCRIBE) {
@@ -936,7 +936,7 @@ public class PublishSubscribeService {
         }
 
         AsyncSemaphore semaphore = getSemaphore(channelName);
-        CompletableFuture<Void> sf = semaphore.acquire();
+        CompletableFuture<Runnable> sf = semaphore.acquire();
         int timeout = config.getSubscriptionTimeout();
         connectionManager.getServiceManager().newTimeout(t -> {
             sf.completeExceptionally(new RedisTimeoutException("Remove listeners operation timeout: (" + timeout + "ms) for " + channelName + " topic"));
@@ -977,7 +977,7 @@ public class PublishSubscribeService {
 
         AsyncSemaphore semaphore = getSemaphore(channelName);
 
-        CompletableFuture<Void> sf = semaphore.acquire();
+        CompletableFuture<Runnable> sf = semaphore.acquire();
         int timeout = config.getSubscriptionTimeout();
         connectionManager.getServiceManager().newTimeout(t -> {
             sf.completeExceptionally(new RedisTimeoutException("Remove listeners operation timeout: (" + timeout + "ms) for " + channelName + " topic"));

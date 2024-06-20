@@ -76,14 +76,10 @@ public class ConnectionsHolder<T extends RedisConnection> {
         return freeConnectionsCounter;
     }
 
-    protected CompletableFuture<Void> acquireConnection() {
+    protected CompletableFuture<Runnable> acquireConnection() {
         return freeConnectionsCounter.acquire();
     }
     
-    private void releaseConnection() {
-        freeConnectionsCounter.release();
-    }
-
     private void addConnection(T conn) {
         conn.setLastUsageTime(System.nanoTime());
         freeConnections.add(conn);
@@ -132,19 +128,19 @@ public class ConnectionsHolder<T extends RedisConnection> {
     }
 
     private CompletableFuture<Void> createConnection(int minimumIdleSize, int index) {
-        CompletableFuture<Void> f = acquireConnection();
-        return f.thenCompose(r -> {
+        CompletableFuture<Runnable> f = acquireConnection();
+        return f.thenCompose(releaseConnection -> {
             CompletableFuture<T> promise = new CompletableFuture<>();
-            createConnection(promise);
+            createConnection(promise, releaseConnection);
             return promise.handle((conn, e) -> {
+                conn.setReleaseConnection(releaseConnection);
                 if (e == null) {
                     if (changeUsage) {
                         conn.decUsage();
                     }
                     addConnection(conn);
                 }
-
-                releaseConnection();
+                releaseConnection.run();
 
                 if (e != null) {
                     for (RedisConnection connection : getAllConnections()) {
@@ -170,12 +166,11 @@ public class ConnectionsHolder<T extends RedisConnection> {
         });
     }
 
-    private void createConnection(CompletableFuture<T> promise) {
+    private void createConnection(CompletableFuture<T> promise, Runnable release) {
         CompletionStage<T> connFuture = connectionCallback.apply(client);
         connFuture.whenComplete((conn, e) -> {
             if (e != null) {
-                releaseConnection();
-
+                release.run();
                 promise.completeExceptionally(e);
                 return;
             }
@@ -187,24 +182,22 @@ public class ConnectionsHolder<T extends RedisConnection> {
             if (changeUsage) {
                 promise.thenApply(c -> c.incUsage());
             }
-            connectedSuccessful(promise, conn);
+            connectedSuccessful(promise, conn, release);
         });
     }
 
-    private void connectedSuccessful(CompletableFuture<T> promise, T conn) {
+    private void connectedSuccessful(CompletableFuture<T> promise, T conn, Runnable release) {
         if (!promise.complete(conn)) {
             releaseConnection(conn);
-            releaseConnection();
         }
+        release.run();
     }
 
     public CompletableFuture<T> acquireConnection(RedisCommand<?> command) {
         CompletableFuture<T> result = new CompletableFuture<>();
 
-        CompletableFuture<Void> f = acquireConnection();
-        f.thenAccept(r -> {
-            connectTo(result, command);
-        });
+        CompletableFuture<Runnable> f = acquireConnection();
+        f.thenAccept(r -> connectTo(result, command, r));
         result.whenComplete((r, e) -> {
             if (e != null) {
                 f.completeExceptionally(e);
@@ -213,21 +206,21 @@ public class ConnectionsHolder<T extends RedisConnection> {
         return result;
     }
 
-    private void connectTo(CompletableFuture<T> promise, RedisCommand<?> command) {
+    private void connectTo(CompletableFuture<T> promise, RedisCommand<?> command, Runnable release) {
         if (promise.isDone()) {
             serviceManager.getGroup().submit(() -> {
-                releaseConnection();
+                release.run();
             });
             return;
         }
 
         T conn = pollConnection(command);
         if (conn != null) {
-            connectedSuccessful(promise, conn);
+            connectedSuccessful(promise, conn, release);
             return;
         }
 
-        createConnection(promise);
+        createConnection(promise, release);
     }
 
     @Override
@@ -246,7 +239,7 @@ public class ConnectionsHolder<T extends RedisConnection> {
         } else {
             releaseConnection(connection);
         }
-        releaseConnection();
+        connection.releaseConnection();
     }
 
 }
