@@ -25,6 +25,7 @@ import org.redisson.connection.ClientConnectionsEntry;
 import org.redisson.connection.ConnectionManager;
 import org.redisson.connection.ConnectionsHolder;
 import org.redisson.connection.MasterSlaveEntry;
+import org.redisson.misc.DebugCounter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -113,7 +114,9 @@ abstract class ConnectionPool<T extends RedisConnection> {
         CompletableFuture<T> result = handler.acquireConnection(command);
         CompletableFuture<T> cancelableFuture = new CompletableFuture<>();
         result.whenComplete((r, e) -> {
+            DebugCounter.poolResult.incrementAndGet();
             if (e != null) {
+                System.out.println("error");
                 if (entry.getNodeType() == NodeType.SLAVE) {
                     FailedNodeDetector detector = entry.getClient().getConfig().getFailedNodeDetector();
                     detector.onConnectFailed();
@@ -134,6 +137,7 @@ abstract class ConnectionPool<T extends RedisConnection> {
             }
 
             if (!cancelableFuture.complete(r)) {
+                System.out.println("cancelFuture can't complete");
                 entry.returnConnection(r);
             }
         });

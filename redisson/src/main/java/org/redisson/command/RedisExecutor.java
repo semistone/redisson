@@ -39,6 +39,7 @@ import org.redisson.connection.MasterSlaveEntry;
 import org.redisson.connection.NodeSource;
 import org.redisson.connection.NodeSource.Redirect;
 import org.redisson.liveobject.core.RedissonObjectBuilder;
+import org.redisson.misc.DebugCounter;
 import org.redisson.misc.LogHelper;
 import org.redisson.misc.RedisURI;
 import org.slf4j.Logger;
@@ -133,18 +134,31 @@ public class RedisExecutor<V, R> {
             codec = getCodec(codec);
 
             CompletableFuture<R> attemptPromise = new CompletableFuture<>();
-            CompletableFuture<RedisConnection> connectionFuture = getConnection(attemptPromise);
+
+            CompletableFuture<RedisConnection> conn = getConnection(attemptPromise);
+            attemptPromise.whenComplete((r, e) -> {
+                DebugCounter.attemptComplete.incrementAndGet();
+                releaseConnection(attemptPromise, conn);
+
+                checkAttemptPromise(attemptPromise, conn);
+            }).whenComplete((r, e) -> {
+                if (e != null) {
+                    log.error(e.getMessage(), e);
+                }
+            });
             mainPromiseListener = (r, e) -> {
                 if (!mainPromise.isCompletedExceptionally()) {
+                    System.out.println("error1");
                     return;
                 }
 
-                if (connectionFuture.completeExceptionally(new CancellationException())) {
+                if (conn.completeExceptionally(new CancellationException())) {
                     log.debug("Connection obtaining canceled for {}", command);
                     timeout.ifPresent(Timeout::cancel);
                     if (attemptPromise.completeExceptionally(new CancellationException())) {
                         free();
                     }
+                    System.out.println("error2");
                     return;
                 }
 
@@ -152,7 +166,7 @@ public class RedisExecutor<V, R> {
                     if (writeFuture.cancel(false)) {
                         attemptPromise.completeExceptionally(new CancellationException());
                     } else {
-                        RedisConnection c = connectionFuture.getNow(null);
+                        RedisConnection c = conn.getNow(null);
                         c.forceFastReconnectAsync().whenComplete((res, ex) -> {
                             attemptPromise.completeExceptionally(new CancellationException());
                         });
@@ -168,26 +182,30 @@ public class RedisExecutor<V, R> {
                 });
             }
 
-            scheduleRetryTimeout(connectionFuture, attemptPromise);
+            scheduleRetryTimeout(conn, attemptPromise);
 
-            scheduleConnectionTimeout(attemptPromise, connectionFuture);
+            scheduleConnectionTimeout(attemptPromise, conn);
 
-            connectionFuture.whenComplete((connection, e) -> {
-                if (connectionFuture.isCancelled()) {
+            conn.whenComplete((connection, e) -> {
+                DebugCounter.connectComplete.incrementAndGet();
+                if (conn.isCancelled()) {
+                    System.out.println("cancel");
                     return;
                 }
 
-                if (connectionFuture.isDone() && connectionFuture.isCompletedExceptionally()) {
-                    exception = convertException(connectionFuture);
+                if (conn.isDone() && conn.isCompletedExceptionally()) {
+                    exception = convertException(conn);
                     tryComplete(attemptPromise, exception);
+                    System.out.println("error4");
                     return;
                 }
 
                 try {
                     sendCommand(attemptPromise, connection);
                 } catch (Exception ex) {
+                    System.out.println("error5");
                     free();
-                    handleError(connectionFuture, e);
+                    handleError(conn, e);
                     return;
                 }
 
@@ -198,16 +216,9 @@ public class RedisExecutor<V, R> {
                 });
             });
 
-            attemptPromise.whenComplete((r, e) -> {
-                releaseConnection(attemptPromise, connectionFuture);
 
-                checkAttemptPromise(attemptPromise, connectionFuture);
-            }).whenComplete((r, e) -> {
-                if (e != null) {
-                    log.error(e.getMessage(), e);
-                }
-            });
-        } catch (Exception e) {
+        } catch (Throwable e) {
+            System.out.println("error6");
             free();
             handleError(connectionFuture, e);
             throw e;
@@ -669,17 +680,30 @@ public class RedisExecutor<V, R> {
                 log.debug("acquired{}connection for command {} and params {} from slot {} using node {}... {}",
                         connectionType, command, LogHelper.toString(params), source, connection.getRedisClient().getAddr(), connection);
             }
-            writeFuture = connection.send(new CommandData<>(attemptPromise, codec, command, params));
+            DebugCounter.send.incrementAndGet();
+            try {
+                DebugCounter.sent.set(false);
+                writeFuture = connection.send(new CommandData<>(attemptPromise, codec, command, params));
+            } catch (Throwable e) {
+                e.printStackTrace();
+                throw e;
+            } finally {
+            }
 
             if (connectionManager.getServiceManager().getConfig().getMasterConnectionPoolSize() < 10
                     && !command.isBlockingCommand()) {
+                DebugCounter.sent.set(true);
+                DebugCounter.exeRelease.incrementAndGet();
                 release(connection);
+            } else {
+                System.out.println("why");
             }
         }
     }
 
     protected void releaseConnection(CompletableFuture<R> attemptPromise, CompletableFuture<RedisConnection> connectionFuture) {
         if (connectionFuture.isDone() && connectionFuture.isCompletedExceptionally()) {
+            System.out.println("connection done");
             return;
         }
 
@@ -728,11 +752,13 @@ public class RedisExecutor<V, R> {
             reuseConnection = false;
             return connectionFuture;
         }
+        CompletableFuture<RedisConnection> conn = null;
         if (readOnlyMode) {
-            connectionFuture = connectionReadOp(command, attemptPromise);
+            conn= connectionReadOp(command, attemptPromise);
         } else {
-            connectionFuture = connectionWriteOp(command, attemptPromise);
+            conn= connectionWriteOp(command, attemptPromise);
         }
+        this.connectionFuture = conn;
         return connectionFuture;
     }
 
@@ -795,12 +821,14 @@ public class RedisExecutor<V, R> {
             // TODO make the method async
             entry = getEntry(true);
         } catch (Exception e) {
+            e.printStackTrace();
             attemptPromise.completeExceptionally(e);
             CompletableFuture<RedisConnection> f = new CompletableFuture<>();
             f.completeExceptionally(e);
             return f;
         }
         if (entry == null) {
+            System.out.println("entry null");
             CompletableFuture<RedisConnection> f = new CompletableFuture<>();
             f.completeExceptionally(connectionManager.getServiceManager().createNodeNotFoundException(source));
             return f;

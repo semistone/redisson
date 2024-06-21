@@ -28,9 +28,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class AsyncSemaphore {
 
     private final AtomicInteger counter;
-    private final Queue<CompletableFuture<Void>> listeners = new ConcurrentLinkedQueue<>();
+    private final Queue<CompletableFuture<Integer>> listeners = new ConcurrentLinkedQueue<>();
 
+    public final int p;
     public AsyncSemaphore(int permits) {
+        p = permits;
         counter = new AtomicInteger(permits);
     }
     
@@ -42,8 +44,8 @@ public class AsyncSemaphore {
         listeners.clear();
     }
 
-    public CompletableFuture<Void> acquire() {
-        CompletableFuture<Void> future = new CompletableFuture<>();
+    public CompletableFuture<Integer> acquire() {
+        CompletableFuture<Integer> future = new CompletableFuture<>();
         listeners.add(future);
         tryRun();
         return future;
@@ -52,13 +54,13 @@ public class AsyncSemaphore {
     private void tryRun() {
         while (true) {
             if (counter.decrementAndGet() >= 0) {
-                CompletableFuture<Void> future = listeners.poll();
+                CompletableFuture<Integer> future = listeners.poll();
                 if (future == null) {
                     counter.incrementAndGet();
                     return;
                 }
 
-                if (future.complete(null)) {
+                if (future.complete(p == 1 ? DebugCounter.lock.incrementAndGet() : 0)) {
                     return;
                 }
             }
@@ -75,6 +77,12 @@ public class AsyncSemaphore {
 
     public void release() {
         counter.incrementAndGet();
+        if (p == 1) {
+            int i = DebugCounter.release.incrementAndGet();
+            if (i % 2000 == 0) {
+                System.out.println(this);
+            }
+        }
         tryRun();
     }
 
@@ -82,7 +90,5 @@ public class AsyncSemaphore {
     public String toString() {
         return "value:" + counter + ":queue:" + queueSize();
     }
-    
-    
     
 }

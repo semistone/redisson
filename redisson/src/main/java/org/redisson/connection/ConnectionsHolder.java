@@ -20,6 +20,7 @@ import org.redisson.client.RedisConnection;
 import org.redisson.client.RedisConnectionException;
 import org.redisson.client.protocol.RedisCommand;
 import org.redisson.misc.AsyncSemaphore;
+import org.redisson.misc.DebugCounter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -76,7 +77,7 @@ public class ConnectionsHolder<T extends RedisConnection> {
         return freeConnectionsCounter;
     }
 
-    protected CompletableFuture<Void> acquireConnection() {
+    protected CompletableFuture<Integer> acquireConnection() {
         return freeConnectionsCounter.acquire();
     }
     
@@ -132,7 +133,7 @@ public class ConnectionsHolder<T extends RedisConnection> {
     }
 
     private CompletableFuture<Void> createConnection(int minimumIdleSize, int index) {
-        CompletableFuture<Void> f = acquireConnection();
+        CompletableFuture<Integer> f = acquireConnection();
         return f.thenCompose(r -> {
             CompletableFuture<T> promise = new CompletableFuture<>();
             createConnection(promise);
@@ -182,6 +183,7 @@ public class ConnectionsHolder<T extends RedisConnection> {
 
             log.debug("new connection created: {}", conn);
 
+            System.out.println("create connection");
             allConnections.add(conn);
 
             if (changeUsage) {
@@ -192,39 +194,59 @@ public class ConnectionsHolder<T extends RedisConnection> {
     }
 
     private void connectedSuccessful(CompletableFuture<T> promise, T conn) {
-        if (!promise.complete(conn)) {
-            releaseConnection(conn);
-            releaseConnection();
+        DebugCounter.beforeConnected2.incrementAndGet();
+        try {
+            if (!promise.complete(conn)) {
+                System.out.println("what====================");
+                releaseConnection(conn);
+                releaseConnection();
+            }
+        } catch (Throwable e) {
+            e.printStackTrace();
+        } finally {
+            DebugCounter.connected.incrementAndGet();
         }
     }
 
     public CompletableFuture<T> acquireConnection(RedisCommand<?> command) {
         CompletableFuture<T> result = new CompletableFuture<>();
 
-        CompletableFuture<Void> f = acquireConnection();
-        f.thenAccept(r -> {
-            connectTo(result, command);
-        });
+        CompletableFuture<Integer> f = acquireConnection();
         result.whenComplete((r, e) -> {
             if (e != null) {
+                e.printStackTrace();
                 f.completeExceptionally(e);
             }
         });
+        f.thenAccept(r -> {
+            if (r > 0) {
+                DebugCounter.afterLock.incrementAndGet();
+            } else {
+                System.out.println("rrrrr");
+            }
+            connectTo(result, command);
+        });
+
         return result;
     }
 
     private void connectTo(CompletableFuture<T> promise, RedisCommand<?> command) {
         if (promise.isDone()) {
+            System.out.println("done...........");
             serviceManager.getGroup().submit(() -> {
+                System.out.println("release");
                 releaseConnection();
             });
             return;
         }
 
+        DebugCounter.pollCon.incrementAndGet();
         T conn = pollConnection(command);
         if (conn != null) {
             connectedSuccessful(promise, conn);
             return;
+        } else {
+            System.out.println("create connection");
         }
 
         createConnection(promise);
