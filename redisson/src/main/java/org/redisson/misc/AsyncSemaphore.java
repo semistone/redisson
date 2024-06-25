@@ -18,6 +18,7 @@ package org.redisson.misc;
 import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -28,7 +29,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public final class AsyncSemaphore {
 
     private final AtomicInteger counter;
-    private final Queue<CompletableFuture<Void>> listeners = new ConcurrentLinkedQueue<>();
+    private final Queue<CompletableFuture<Lock>> listeners = new ConcurrentLinkedQueue<>();
 
     public AsyncSemaphore(int permits) {
         counter = new AtomicInteger(permits);
@@ -42,8 +43,8 @@ public final class AsyncSemaphore {
         listeners.clear();
     }
 
-    public CompletableFuture<Void> acquire() {
-        CompletableFuture<Void> future = new CompletableFuture<>();
+    public CompletableFuture<Lock> acquire() {
+        CompletableFuture<Lock> future = new CompletableFuture<>();
         listeners.add(future);
         tryRun();
         return future;
@@ -52,14 +53,25 @@ public final class AsyncSemaphore {
     private void tryRun() {
         while (true) {
             if (counter.decrementAndGet() >= 0) {
-                CompletableFuture<Void> future = listeners.poll();
+                CompletableFuture<Lock> future = listeners.poll();
                 if (future == null) {
                     counter.incrementAndGet();
                     return;
                 }
 
-                if (future.complete(null)) {
-                    return;
+                if (!future.isDone()) {
+                    AtomicBoolean once = new AtomicBoolean();
+                    // if in the same thread and tryNext is false means in the same stack.
+                    AtomicBoolean tryNext = new AtomicBoolean();
+                    long currentThreadId = Thread.currentThread().getId();
+                    if (future.complete(() -> {
+                        if (once.compareAndSet(false, true)) {
+                            release(Thread.currentThread().getId() != currentThreadId || tryNext.get());
+                        }
+                    })) {
+                        return;
+                    }
+                    tryNext.set(true);
                 }
             }
 
@@ -73,9 +85,15 @@ public final class AsyncSemaphore {
         return counter.get();
     }
 
-    public void release() {
+    private void release(boolean needTryRun) {
         counter.incrementAndGet();
-        tryRun();
+        if (needTryRun) {
+            tryRun();
+        }
+    }
+    
+    public void release() {
+        release(true);
     }
 
     @Override
@@ -83,6 +101,9 @@ public final class AsyncSemaphore {
         return "value:" + counter + ":queue:" + queueSize();
     }
     
-    
-    
+
+    public interface Lock {
+        void release();
+    }
+
 }
